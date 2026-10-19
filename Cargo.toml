@@ -1,0 +1,21 @@
+[package]
+name = "duckdb_dp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Differential-privacy function family for DuckDB — pure-SQL Laplace mechanism (dp_count/dp_sum/dp_mean), registered by a thin Rust shim at LOAD"
+
+[lib]
+name = "dp"
+crate-type = ["cdylib"]
+
+[dependencies]
+quack-rs = { version = "0.15", features = ["duckdb-1-5"] }
+libduckdb-sys = { version = ">=1.5.4, <2", features = ["loadable-extension"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
+codegen-units = 1
+strip = true
