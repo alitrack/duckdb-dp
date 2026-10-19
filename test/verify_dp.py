@@ -14,7 +14,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 def fetch(db, sql):
     out = subprocess.run([db, "-unsigned", "-csv", "-noheader", "-list",
-                          "-c", ".read ./dp.sql", "-c", sql],
+                          "-c", ".read ../dp.sql", "-c", sql],
                          capture_output=True, text=True, cwd=HERE)
     if out.returncode != 0:
         print("duckdb error:", out.stderr); sys.exit(1)

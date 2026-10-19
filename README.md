@@ -1,58 +1,87 @@
-# duckdb-dp — 差分隐私函数族 (DuckDB SQL 宏)
+# duckdb-dp — differential-privacy function family for DuckDB
 
-**#2026101901** · DuckDB v2.0.0-alpha39998 / v1.5.6 实测 · 零依赖, 纯 SQL 宏
+**(ε,0)-differential-privacy publishing, straight in SQL.** Classic Laplace mechanism,
+deterministic reproducible noise, zero native per-row work. Verified on DuckDB
+v2.0.0-alpha39998 and v1.5.6.
 
-在 DuckDB 里做 (ε,0)-差分隐私发布: 经典 Laplace 机制, 噪声确定性派生 (可复现),
-聚合直接嵌在 SQL 里, 不需要 Python/扩展二进制。
+> [中文版](README_CN.md)
 
-## 函数
+## What it is
 
-| 函数 | 机制 | 敏感度 |
+The privacy math is **pure SQL macros** (`dp.sql`, zero dependencies). The bundled
+Rust extension is a **thin load shim** — it exists only so the community registry
+can build a loadable `.duckdb_extension` binary: on `LOAD` it executes `dp.sql`
+and registers the `dp_*` macros. There is no per-row native code.
+
+`INSTALL dp FROM community;` — or just `.read dp.sql` directly.
+
+## Functions
+
+| function | mechanism | sensitivity |
 |---|---|---|
-| `dp_count(x, eps, salt := 'dp')` | 计数 + Laplace(1/eps) | 1 |
-| `dp_sum(x, eps, lb, ub, salt := 'dp')` | 截断和 + Laplace((ub-lb)/eps) | ub−lb |
-| `dp_mean(x, eps, lb, ub, salt := 'dp')` | 截断均值 + Laplace((ub-lb)/(2n·eps)) | (ub-lb)/(2n) |
-| `dp_noise_lap(b, salt)` / `dp_noise_gauss(sigma, salt)` | 噪声原语 | — |
-| `dp_u(salt)` / `dp_v(salt)` | 确定性均匀数 (内部) | — |
+| `dp_count(x, eps, salt := 'dp')` | count + Laplace(1/eps) | 1 |
+| `dp_sum(x, eps, lb, ub, salt := 'dp')` | clipped sum + Laplace((ub-lb)/eps) | ub−lb |
+| `dp_mean(x, eps, lb, ub, salt := 'dp')` | clipped mean + Laplace((ub-lb)/(2n·eps)) | (ub-lb)/(2n) |
+| `dp_noise_lap(b, salt)` / `dp_noise_gauss(sigma, salt)` | noise primitives | — |
+| `dp_u(salt)` / `dp_v(salt)` | deterministic uniform (internal) | — |
 
-调用约定 (聚合收 LIST, 对齐 `duckdb_stats/stats_fill.sql`):
+Aggregates take a **LIST** (house convention, same as `duckdb_stats`):
 
 ```sql
 .read ./dp.sql
 
-SELECT dp_count(array_agg(age), 0.1, 'pub_2026q4')            AS dp_n,
-       dp_mean(array_agg(age), 0.1, 0, 100, 'pub_2026q4')     AS dp_age
+SELECT dp_count(array_agg(age), 0.1, 'pub_2026q4')       AS dp_n,
+       dp_mean(array_agg(age), 0.1, 0, 100, 'pub_2026q4') AS dp_age
 FROM patients;
 ```
 
-- **eps** = 隐私预算, `<=0` 返回 NULL (不发布)
-- **salt** = 发布标识: 同 salt 重跑同噪声 (dashboard 不漂移); 不同 salt 独立噪声
-  (按发布单元分预算)。必须对所有行是同一常量。
-- **lb/ub** = 截断边界, 语义核心不是可选项 (不截断就没有敏感度保证)
-- NULL 行不计入 (对齐 COUNT/AVG 语义); `ub <= lb` 返回 NULL
+- **eps** = privacy budget; `eps <= 0` returns NULL (nothing published).
+- **salt** = publication identifier. Same salt → same noise on re-run (reproducible
+  dashboards); different salt → independent noise (assign a fresh salt per
+  publication when budget is tracked per release). Must be one constant across rows.
+- **lb / ub** = clipping bounds — semantically core, not optional: the noise scale
+  is `ub - lb`, so no clip means no sensitivity guarantee.
+- NULL rows are not counted (matches COUNT/AVG); `ub <= lb` → NULL.
 
-端到端 demo: `demo.sql` (300 患者合成队列, eps 0.1/0.01 对比, 可复现重跑)。
+End-to-end demo: `test/demo.sql` (300-patient synthetic cohort, eps 0.1 vs 0.01,
+reproducible re-run).
 
-## 测试
+## Testing
 
 ```bash
-bash run_tests.sh        # 12 项断言, 全绿退出 0
-python3 verify_dp.py     # 统计校验: 噪声矩 vs 理论值 (N=2000, ±10%)
+bash test/run_tests.sh     # 12 assertions, all green → exit 0
+python3 test/verify_dp.py  # moment checks: noise vs theory (N=2000, ±10%)
 ```
 
-## 已知边界 (原型, 诚实声明)
+## Honest scope (prototype)
 
-1. **单查询机制, 不做组合记账** — 多个 dp_* 串联发布要自己按基本组合 (Σeps)
-   或高级组合 (Dwork-Roth Thm 3.7) 算总预算。
-2. **非自适应** — 同 salt 派生的多路噪声相关; 跨发布复用 salt = 共享噪声,
-   预算不可加。
-3. **数值** — 均匀数 48 位, 对数域裁剪 [2^-20, 1−2^-20] (2^-48 低于 double 精度,
-   不裁剪会 ln(0)→inf, T11 回归锁住)。
-4. **升级路线** — 要 RDP/账本/复杂查询时迁 C++ 扩展 + OpenDP (MIT/Rust/C ABI)。
+1. **Single-query mechanism, no composition accounting.** Publishing several
+   `dp_*` values back-to-back — you sum the budgets yourself (basic composition,
+   Σeps) or use advanced composition (Dwork-Roth Thm 3.7).
+2. **Non-adaptive.** Noise derived from one salt is correlated across calls;
+   reusing a salt across independent publications shares noise and breaks additivity.
+3. **Numerics.** 48-bit deterministic uniform; the log domain is clamped to
+   `[2^-20, 1−2^-20]` (a 48-bit value within 2^-48 of 1 would otherwise round
+   `1-V` to 0 → `ln(0)` → ±inf; regression-locked by the test suite).
+4. **Upgrade path.** For RDP / ledger accounting / complex queries, move to a C++
+   extension over **OpenDP** (MIT / Rust / C ABI).
 
-## 与已有生态的关系
+## Relation to the registry
 
-- 注册表 370 扩展 (2026-10-18 重扫): 无 DP 覆盖 (`differential` 扩展 = 版本管理/
-  时间旅行, 无关; `table_guard` = 表级访问控制, 非脱敏; `semantic_profile`
-  只做 PII 检测)。
-- `duckdb_stats`: 统计层 (推断/假设检验), 本包是发布层 (隐私预算), 不重叠。
+Registry 370-extension rescan (2026-10-18): no differential-privacy coverage.
+(`differential` = database versioning / time travel; `table_guard` = table-level
+access control; `semantic_profile` = PII detection only — none implement a DP
+mechanism.) `duckdb_stats` is the statistics layer (inference / hypothesis tests);
+this is the publishing layer (privacy budget) — no overlap.
+
+## Repository layout
+
+```
+dp.sql              # the privacy math — pure SQL macros (the product)
+src/                # thin Rust load shim (registers dp.sql at LOAD)
+  lib.rs            #   entry_point_v2! + statement splitter
+  engine.rs         #   persistent secondary connection
+test/               # demo.sql, dp_test.sql (assertions), verify_dp.py (moments)
+Makefile            # build (community-ci-tools scaffold)
+extension-ci-tools/ # submodule → duckdb/extension-ci-tools @ v1.5-variegata
+```

@@ -1,4 +1,4 @@
-.read ./dp.sql
+.read ../dp.sql
 -- 端到端 demo: 合成医疗队列 (300 患者, 年龄 20-80, 收入 3-30k/年)
 CREATE OR REPLACE TEMP TABLE patients AS
 SELECT
